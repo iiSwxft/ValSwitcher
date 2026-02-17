@@ -1609,7 +1609,13 @@ del "%~f0"
             self.layout.addWidget(card)
         self.spacer = self.layout.addStretch(1)  # Update this line
         self.layout.addWidget(self.create_add_button())
-        self.layout.addSpacing(20)
+
+        # Version label in bottom right
+        version_label = QLabel(f"v{APP_VERSION}", self)
+        version_label.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 10px;")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.layout.addWidget(version_label)
+        self.layout.addSpacing(5)
 
     def add_account(self):
         """Kill Riot, clear local session files (without signing out), and relaunch to login screen."""
