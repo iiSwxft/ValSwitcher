@@ -159,6 +159,194 @@ def is_process_running(process_name):
             return False
     return False
 
+class CookieManager:
+    """Handles Riot auth cookie extraction, storage, reauth, and injection."""
+
+    REAUTH_URL = (
+        'https://auth.riotgames.com/authorize'
+        '?redirect_uri=https%3A%2F%2Fplayvalorant.com%2Fopt_in'
+        '&client_id=play-valorant-web-prod'
+        '&response_type=token%20id_token'
+        '&nonce=1'
+        '&scope=account%20openid'
+    )
+
+    def extract_cookies_from_yaml(self, yaml_path):
+        """Extract auth cookies from RiotGamesPrivateSettings.yaml."""
+        import yaml
+        try:
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+
+            cookies = {}
+
+            # Extract riot-login cookies
+            login_cookies = (data.get('riot-login', {})
+                             .get('persist', {})
+                             .get('session', {})
+                             .get('cookies', []))
+            for cookie in login_cookies:
+                name = cookie.get('name')
+                value = cookie.get('value')
+                if name and value:
+                    cookies[name] = {
+                        'value': value,
+                        'domain': cookie.get('domain', 'auth.riotgames.com'),
+                        'httpOnly': cookie.get('httpOnly', True),
+                        'secureOnly': cookie.get('secureOnly', True),
+                        'persistent': cookie.get('persistent', True),
+                        'hostOnly': cookie.get('hostOnly', True),
+                        'path': cookie.get('path', '/'),
+                    }
+
+            # Extract tdid from rso-authenticator
+            tdid_data = data.get('rso-authenticator', {}).get('tdid', {})
+            if tdid_data and tdid_data.get('value'):
+                cookies['tdid'] = {
+                    'value': tdid_data['value'],
+                    'domain': tdid_data.get('domain', 'riotgames.com'),
+                    'httpOnly': tdid_data.get('httpOnly', True),
+                    'secureOnly': tdid_data.get('secureOnly', True),
+                    'persistent': tdid_data.get('persistent', True),
+                    'hostOnly': tdid_data.get('hostOnly', False),
+                    'path': tdid_data.get('path', '/'),
+                    'expiryTime': tdid_data.get('expiryTime', 0),
+                }
+
+            return cookies
+        except Exception as e:
+            debug_log(f'Error extracting cookies from YAML: {e}')
+            return {}
+
+    def save_cookies_to_config(self, account_section, cookies):
+        """Save cookies to config.ini under the account section."""
+        config = get_config()
+        if not config.has_section(account_section):
+            return False
+
+        # Store each cookie value with cookie_ prefix
+        for name, data in cookies.items():
+            config[account_section][f'cookie_{name}'] = data['value']
+
+        # Store refresh timestamp
+        config[account_section]['cookie_last_refresh'] = str(time.time())
+        save_config()
+        debug_log(f'Saved {len(cookies)} cookies for {account_section}')
+        return True
+
+    def load_cookies_from_config(self, account_section):
+        """Load cookies from config.ini for given account."""
+        config = get_config()
+        if not config.has_section(account_section):
+            return {}
+
+        cookies = {}
+        for key, value in config[account_section].items():
+            if key.startswith('cookie_') and key != 'cookie_last_refresh':
+                name = key[7:]  # Strip 'cookie_' prefix
+                # Determine domain based on cookie name
+                if name == 'tdid' or name == '__cf_bm':
+                    domain = 'riotgames.com'
+                else:
+                    domain = 'auth.riotgames.com'
+                cookies[name] = {'value': value, 'domain': domain}
+
+        return cookies
+
+    def get_last_refresh_time(self, account_section):
+        """Get timestamp of last cookie refresh."""
+        config = get_config()
+        try:
+            return float(config[account_section].get('cookie_last_refresh', '0'))
+        except (KeyError, ValueError):
+            return 0
+
+    def perform_reauth(self, cookies):
+        """Attempt cookie reauth via Riot endpoint. Returns (success, new_cookies)."""
+        try:
+            # Build cookie string
+            cookie_str = '; '.join(
+                f"{name}={data['value']}" for name, data in cookies.items()
+            )
+
+            scraper = cloudscraper.create_scraper(
+                browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
+            )
+
+            resp = scraper.get(
+                self.REAUTH_URL,
+                headers={
+                    'Cookie': cookie_str,
+                    'User-Agent': 'RiotClient/99.0.0.0 rso-auth (Windows;10;;Professional, x64)',
+                },
+                allow_redirects=False,
+                timeout=10
+            )
+
+            location = resp.headers.get('Location', '')
+
+            # Success: redirect URL contains access_token
+            if 'access_token=' not in location:
+                debug_log(f'Reauth failed - status {resp.status_code}, no access_token in redirect')
+                return False, {}
+
+            # Extract new cookies from response Set-Cookie headers
+            new_cookies = dict(cookies)  # Start with existing
+            if hasattr(resp, 'cookies'):
+                for cookie in resp.cookies:
+                    new_cookies[cookie.name] = {
+                        'value': cookie.value,
+                        'domain': cookie.domain or 'auth.riotgames.com',
+                    }
+
+            debug_log(f'Reauth successful')
+            return True, new_cookies
+
+        except Exception as e:
+            debug_log(f'Cookie reauth error: {e}')
+            return False, {}
+
+    def write_cookies_to_yaml(self, yaml_path, cookies):
+        """Write fresh cookies back to RiotGamesPrivateSettings.yaml."""
+        import yaml
+        try:
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+
+            if not data:
+                return False
+
+            # Rebuild the cookies list for riot-login
+            existing_cookies = (data.get('riot-login', {})
+                                .get('persist', {})
+                                .get('session', {})
+                                .get('cookies', []))
+
+            # Update existing cookies with new values, preserve structure
+            for existing in existing_cookies:
+                name = existing.get('name')
+                if name in cookies:
+                    existing['value'] = cookies[name]['value']
+
+            # Handle tdid separately
+            if 'tdid' in cookies:
+                if 'rso-authenticator' in data and 'tdid' in data['rso-authenticator']:
+                    data['rso-authenticator']['tdid']['value'] = cookies['tdid']['value']
+
+            # Write back
+            temp_path = yaml_path + '.tmp'
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+            os.replace(temp_path, yaml_path)
+
+            debug_log(f'Wrote fresh cookies to {os.path.basename(yaml_path)}')
+            return True
+
+        except Exception as e:
+            debug_log(f'Error writing cookies to YAML: {e}')
+            return False
+
+
 class RiotSessionManager:
     """Manages Riot Client session backup and restore for account switching"""
 
@@ -362,6 +550,101 @@ class RiotSessionManager:
                 print(f'[{datetime.now().strftime("%H:%M:%S")}] Error deleting session: {e}')
                 return False
         return False
+
+    def save_session_with_cookies(self, account_name):
+        """Save session files AND extract/store auth cookies."""
+        success = self.save_session(account_name)
+        if not success:
+            return False
+
+        # Extract cookies from the saved RiotGamesPrivateSettings.yaml
+        account_session_dir = os.path.join(self.sessions_base_dir, account_name.replace(':', '_'))
+        yaml_path = os.path.join(account_session_dir, 'RiotGamesPrivateSettings.yaml')
+
+        if os.path.exists(yaml_path):
+            cookie_mgr = CookieManager()
+            cookies = cookie_mgr.extract_cookies_from_yaml(yaml_path)
+            if cookies:
+                # Find the config section for this account
+                config = get_config()
+                for section in config.sections():
+                    if section == 'SETTINGS':
+                        continue
+                    if config[section].get('name', '') == account_name:
+                        cookie_mgr.save_cookies_to_config(section, cookies)
+                        break
+                debug_log(f'Extracted and saved {len(cookies)} cookies for {account_name}')
+        return success
+
+    def restore_session_with_cookies(self, account_name, config_section=None):
+        """Restore session with cookie reauth for fresh tokens."""
+        cookie_mgr = CookieManager()
+        fresh_cookies = None
+
+        # Try cookie reauth if we have stored cookies
+        if config_section:
+            cookies = cookie_mgr.load_cookies_from_config(config_section)
+            if cookies:
+                for attempt in range(2):
+                    success, fresh_cookies = cookie_mgr.perform_reauth(cookies)
+                    if success:
+                        # Save rotated cookies back to config
+                        cookie_mgr.save_cookies_to_config(config_section, fresh_cookies)
+                        break
+                    debug_log(f'Reauth attempt {attempt + 1}/2 failed')
+                    if attempt < 1:
+                        time.sleep(2)
+                if not fresh_cookies:
+                    debug_log('Cookie reauth failed, falling back to file-only restore')
+
+        # Kill processes and restore files
+        self.kill_riot_processes()
+        success = self._restore_files(account_name)
+
+        # If reauth got fresh cookies, overwrite the restored YAML with them
+        if fresh_cookies and success:
+            yaml_dest = os.path.join(
+                self.local_app_data, 'Riot Games', 'Riot Client', 'Data',
+                'RiotGamesPrivateSettings.yaml'
+            )
+            if os.path.exists(yaml_dest):
+                cookie_mgr.write_cookies_to_yaml(yaml_dest, fresh_cookies)
+
+        return success
+
+    def _restore_files(self, account_name):
+        """Restore session files from backup (without killing processes)."""
+        account_session_dir = os.path.join(self.sessions_base_dir, account_name.replace(':', '_'))
+
+        if not os.path.exists(account_session_dir):
+            debug_log(f'No saved session found for {account_name}')
+            return False
+
+        success = True
+        for file_info in self.session_files:
+            source_path = os.path.join(account_session_dir, file_info['name'])
+            dest_path = file_info['source']
+
+            try:
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+                if file_info['is_dir']:
+                    if os.path.exists(source_path):
+                        if os.path.exists(dest_path):
+                            shutil.rmtree(dest_path)
+                        shutil.copytree(source_path, dest_path)
+                    elif os.path.exists(dest_path):
+                        shutil.rmtree(dest_path)
+                else:
+                    if os.path.exists(source_path):
+                        shutil.copy2(source_path, dest_path)
+                    elif os.path.exists(dest_path):
+                        os.remove(dest_path)
+            except Exception as e:
+                debug_log(f'Error restoring {file_info["name"]}: {e}')
+                success = False
+
+        return success
 
 ## UI ##
 import cloudscraper
@@ -1009,6 +1292,18 @@ class CredentialCard(CardWidget):
         self.use_deceive = state == 2  # Qt.CheckState.Checked
         print(f'[{datetime.now().strftime("%H:%M:%S")}] Deceive {"enabled" if self.use_deceive else "disabled"} for {self.section}')
 
+    def mark_session_expired(self):
+        """Show visual indicator that cookies expired and re-login is needed."""
+        self.launchButton.setText("Re-login")
+        self.launchButton.setToolTip("Session expired - will prompt for login")
+        self.launchButton.setStyleSheet("background-color: rgba(255, 87, 34, 0.3);")
+
+    def mark_session_valid(self):
+        """Reset button to normal state after successful reauth."""
+        self.launchButton.setText("Launch")
+        self.launchButton.setToolTip("")
+        self.launchButton.setStyleSheet("")
+
     def switch_account(self):
         """Switch to this account using session if available, otherwise use password login."""
         # Mark this account as last used
@@ -1016,15 +1311,15 @@ class CredentialCard(CardWidget):
 
         # Check if we have a saved session
         if self.session_manager.has_session(self.section):
-            print(f'[{datetime.now().strftime("%H:%M:%S")}] Using session-based login for {self.section}')
-            # Restore session and launch Riot Client
-            if self.session_manager.restore_session(self.section):
+            debug_log(f'Using session-based login for {self.section}')
+            # Restore session with cookie reauth for fresh tokens
+            if self.session_manager.restore_session_with_cookies(self.section, self.section):
                 self._launch_riot_client()
             else:
-                print(f'[{datetime.now().strftime("%H:%M:%S")}] Session restore failed, falling back to password login')
+                debug_log(f'Session restore failed, falling back to password login')
                 self._password_login()
         else:
-            print(f'[{datetime.now().strftime("%H:%M:%S")}] No session found, using password login')
+            debug_log(f'No session found, using password login')
             self._password_login()
 
     def save_last_used(self):
@@ -1103,7 +1398,7 @@ class CredentialCard(CardWidget):
     def auto_capture_session(self):
         """Automatically capture session after password login."""
         debug_log(f'Auto-capturing session for {self.section}...')
-        if self.session_manager.save_session(self.section):
+        if self.session_manager.save_session_with_cookies(self.section):
             debug_log(f'Session auto-captured! Next login will be instant.')
         else:
             debug_log(f'Auto-capture failed')
@@ -1174,6 +1469,7 @@ class App(FramelessWindow):
     """Main Application Window."""
     rank_data_fetched = pyqtSignal(tuple)
     update_ready = pyqtSignal(str, str)  # (new_exe_path, current_exe_path)
+    cookie_refresh_result = pyqtSignal(str, bool)  # (section, success)
     def __init__(self):
         super().__init__()
         setTheme(Theme.DARK)
@@ -1193,6 +1489,7 @@ class App(FramelessWindow):
         self.credentialLoader.start()
         self.rank_data_fetched.connect(self.add_new_card)
         self.update_ready.connect(self._apply_update)
+        self.cookie_refresh_result.connect(self._on_cookie_refresh_result)
 
     def check_autostart(self):
         """Check if auto-start is enabled in Windows registry."""
@@ -1322,6 +1619,13 @@ class App(FramelessWindow):
 
         self.tray_menu.addSeparator()
 
+        # Export accounts
+        export_action = QAction("Export Accounts", self)
+        export_action.triggered.connect(self.export_accounts)
+        self.tray_menu.addAction(export_action)
+
+        self.tray_menu.addSeparator()
+
         # Auto-start toggle
         autostart_action = QAction("Start with Windows", self)
         autostart_action.setCheckable(True)
@@ -1366,6 +1670,30 @@ class App(FramelessWindow):
         if not hasattr(self, '_tray_message_shown'):
             self.notify("ValoSwitcher", "Minimized to tray. Right-click to quit.", 2000)
             self._tray_message_shown = True
+
+    def export_accounts(self):
+        """Export config and sessions to a zip file."""
+        import zipfile
+        from PyQt6.QtWidgets import QFileDialog
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Accounts", "ValoSwitcher-backup.zip", "Zip Files (*.zip)"
+        )
+        if not save_path:
+            return
+
+        source_dir = os.path.join(os.path.expandvars('%USERPROFILE%'), 'Documents', 'ValoSwitcher')
+        try:
+            with zipfile.ZipFile(save_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, _, files in os.walk(source_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, source_dir)
+                        zf.write(file_path, arcname)
+            self.notify("Export Complete", f"Accounts saved to {os.path.basename(save_path)}")
+            debug_log(f"Exported accounts to {save_path}")
+        except Exception as e:
+            debug_log(f"Export failed: {e}")
 
     def quit_application(self):
         """Properly quit the application."""
@@ -1479,6 +1807,57 @@ del "%~f0"
         self.session_manager = RiotSessionManager()
         debug_log('Account monitor started - watching for Riot Client logins')
 
+    def start_cookie_refresh(self):
+        """Start background cookie refresh timer (every 4 hours)."""
+        self.cookie_refresh_timer = QTimer(self)
+        self.cookie_refresh_timer.timeout.connect(self._refresh_all_cookies)
+        self.cookie_refresh_timer.start(4 * 60 * 60 * 1000)  # 4 hours
+        debug_log('Cookie auto-refresh started (every 4 hours)')
+
+    def _refresh_all_cookies(self):
+        """Refresh cookies for all accounts in background."""
+        from threading import Thread
+        Thread(target=self._do_cookie_refresh, daemon=True).start()
+
+    def _do_cookie_refresh(self):
+        """Worker thread to refresh all account cookies."""
+        cookie_mgr = CookieManager()
+        config = get_config()
+
+        for section in config.sections():
+            if section == 'SETTINGS':
+                continue
+
+            cookies = cookie_mgr.load_cookies_from_config(section)
+            if not cookies:
+                continue
+
+            # Skip if refreshed recently (within 2 hours)
+            last_refresh = cookie_mgr.get_last_refresh_time(section)
+            if time.time() - last_refresh < 2 * 60 * 60:
+                continue
+
+            debug_log(f'Background refresh for {section}...')
+            success, new_cookies = cookie_mgr.perform_reauth(cookies)
+
+            if success:
+                cookie_mgr.save_cookies_to_config(section, new_cookies)
+                debug_log(f'Refreshed cookies for {section}')
+                self.cookie_refresh_result.emit(section, True)
+            else:
+                debug_log(f'Cookie refresh failed for {section}')
+                self.cookie_refresh_result.emit(section, False)
+
+    def _on_cookie_refresh_result(self, section, success):
+        """Handle cookie refresh result on main thread - update card UI."""
+        for card in self.cards:
+            if card.section == section:
+                if success:
+                    card.mark_session_valid()
+                else:
+                    card.mark_session_expired()
+                break
+
     def notify(self, title, message, duration=3000):
         """Show tray notification if notifications are enabled."""
         if get_setting('NOTIFICATIONS', 'true'):
@@ -1531,7 +1910,7 @@ del "%~f0"
         if existing_section:
             # Account exists - just update the session
             debug_log(f'Updating session for {game_name}#{game_tag}')
-            self.session_manager.save_session(existing_section)
+            self.session_manager.save_session_with_cookies(existing_section)
             self.notify("ValoSwitcher", f"Session updated for {game_name}#{game_tag}")
         else:
             # New account - auto-detect username, save config, capture session, add card
@@ -1554,7 +1933,7 @@ del "%~f0"
 
             # Capture the session
             if new_section:
-                self.session_manager.save_session(new_section)
+                self.session_manager.save_session_with_cookies(new_section)
 
             # Add card to UI
             self.fetch_rank_and_add_new_card(current_account, username, "")
@@ -1584,6 +1963,9 @@ del "%~f0"
 
         # Start background account monitor
         self.start_account_monitor()
+
+        # Start background cookie refresh (every 4 hours)
+        self.start_cookie_refresh()
 
         # Check for updates in background
         from threading import Thread
@@ -1641,7 +2023,7 @@ del "%~f0"
         game_name, game_tag = self.auto_detect_game_name_tag()
         if game_name and game_tag:
             account_key = f"{game_name}:{game_tag}"
-            session_mgr.save_session(account_key)
+            session_mgr.save_session_with_cookies(account_key)
             debug_log(f"Saved current session for {account_key} before adding new account")
 
         # Kill Riot processes
