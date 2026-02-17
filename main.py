@@ -88,7 +88,8 @@ def create_default_config(config_path):
         'DECEIVE_PATH': r'%USERPROFILE%\Downloads\Deceive.exe',
         'DECEIVE_ENABLED': 'false',
         'DEBUG': 'false',
-        'NOTIFICATIONS': 'true'
+        'NOTIFICATIONS': 'true',
+        'HENRIK_API_KEY': 'HDEV-f3b06a80-a048-4321-98cd-f62edc19fdae'
     }
 
     with open(config_path, 'w') as config_file:
@@ -656,7 +657,10 @@ from dataclasses import dataclass
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QEventLoop, QTimer, QThread, pyqtSlot
 from PyQt6.QtGui import QIcon, QPalette, QColor, QPixmap, QBrush, QPainter, QAction, QKeySequence, QCursor
 from PyQt6.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QLabel, QSpacerItem, QSizePolicy, QDialog, QLineEdit, QPushButton, QWidget, QSystemTrayIcon, QMenu
+import io as _io, sys as _sys
+_sys.stdout, _sys.stderr = _io.StringIO(), _io.StringIO()
 from qfluentwidgets import (setTheme, Theme, CardWidget, BodyLabel, SplashScreen, LineEdit, PushButton, ToolButton, FluentIcon, StrongBodyLabel, BodyLabel, PopupTeachingTip, TeachingTipTailPosition, FlyoutViewBase, ImageLabel, CheckBox)
+_sys.stdout, _sys.stderr = _sys.__stdout__, _sys.__stderr__
 from qframelesswindow import FramelessWindow
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -911,9 +915,11 @@ class CredentialLoader(QThread):
     def fetch_account_henrik(self, in_game_name, in_game_tag):
         """Fetch account data from Henrik's Valorant API (fallback)"""
         base_url = "https://api.henrikdev.xyz/valorant"
+        api_key = get_config().get('SETTINGS', 'HENRIK_API_KEY', fallback='')
+        headers = {'Authorization': api_key} if api_key else {}
 
         # Fetch account info (card, level, region)
-        account_resp = requests.get(f"{base_url}/v2/account/{urllib.parse.quote(in_game_name)}/{urllib.parse.quote(in_game_tag)}")
+        account_resp = requests.get(f"{base_url}/v2/account/{urllib.parse.quote(in_game_name)}/{urllib.parse.quote(in_game_tag)}", headers=headers)
         account_resp.raise_for_status()
         account_data = account_resp.json()['data']
 
@@ -930,7 +936,7 @@ class CredentialLoader(QThread):
         time_played = "0"
 
         try:
-            mmr_resp = requests.get(f"{base_url}/v2/mmr/{region}/{urllib.parse.quote(in_game_name)}/{urllib.parse.quote(in_game_tag)}")
+            mmr_resp = requests.get(f"{base_url}/v2/mmr/{region}/{urllib.parse.quote(in_game_name)}/{urllib.parse.quote(in_game_tag)}", headers=headers)
             mmr_resp.raise_for_status()
             mmr_data = mmr_resp.json()['data']
 
@@ -952,7 +958,7 @@ class CredentialLoader(QThread):
         # Fetch match history for KDA
         kda_ratios = []
         try:
-            matches_resp = requests.get(f"{base_url}/v3/matches/{region}/{urllib.parse.quote(in_game_name)}/{urllib.parse.quote(in_game_tag)}?filter=competitive")
+            matches_resp = requests.get(f"{base_url}/v3/matches/{region}/{urllib.parse.quote(in_game_name)}/{urllib.parse.quote(in_game_tag)}?filter=competitive", headers=headers)
             matches_resp.raise_for_status()
             matches_data = matches_resp.json()['data']
             for match in matches_data:
