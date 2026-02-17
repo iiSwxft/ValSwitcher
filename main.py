@@ -12,6 +12,9 @@ import os, sys
 import shutil
 import winreg
 
+APP_VERSION = "1.0.0"
+GITHUB_REPO = "iiSwxft/ValSwitcher"
+
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for Nuitka """
     try:
@@ -165,8 +168,16 @@ class RiotSessionManager:
         self.sessions_base_dir = os.path.join(documents, 'sessions')
         self.local_app_data = os.environ.get('LOCALAPPDATA', '')
 
-        # Files to backup/restore (only session-specific files)
+        # Get Riot Client install path from config for install-dir files
+        try:
+            riot_client_path = get_config()['SETTINGS']['RIOTCLIENT_PATH']
+            riot_install_dir = os.path.dirname(riot_client_path)
+        except Exception:
+            riot_install_dir = r'C:\Riot Games\Riot Client'
+
+        # Files to backup/restore for session switching
         self.session_files = [
+            # AppData files
             {
                 'name': 'RiotGamesPrivateSettings.yaml',
                 'source': os.path.join(self.local_app_data, 'Riot Games', 'Riot Client', 'Data', 'RiotGamesPrivateSettings.yaml'),
@@ -176,7 +187,28 @@ class RiotSessionManager:
                 'name': 'Sessions',
                 'source': os.path.join(self.local_app_data, 'Riot Games', 'Riot Client', 'Data', 'Sessions'),
                 'is_dir': True
-            }
+            },
+            {
+                'name': 'RiotClientSettings.yaml',
+                'source': os.path.join(self.local_app_data, 'Riot Games', 'Riot Client', 'Config', 'RiotClientSettings.yaml'),
+                'is_dir': False
+            },
+            {
+                'name': 'lockfile',
+                'source': os.path.join(self.local_app_data, 'Riot Games', 'Riot Client', 'Config', 'lockfile'),
+                'is_dir': False
+            },
+            # Install directory files
+            {
+                'name': 'client.config.yaml',
+                'source': os.path.join(riot_install_dir, 'Config', 'client.config.yaml'),
+                'is_dir': False
+            },
+            {
+                'name': 'client.settings.yaml',
+                'source': os.path.join(riot_install_dir, 'Config', 'client.settings.yaml'),
+                'is_dir': False
+            },
         ]
 
         # Create sessions directory if it doesn't exist
@@ -1340,6 +1372,87 @@ class App(FramelessWindow):
         self.tray_icon.hide()
         QApplication.quit()
 
+    def check_for_updates(self):
+        """Check GitHub releases for a newer version and auto-update."""
+        try:
+            resp = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest", timeout=5)
+            if resp.status_code != 200:
+                return
+            release = resp.json()
+            latest_version = release.get('tag_name', '').lstrip('v')
+            if not latest_version:
+                return
+
+            # Compare versions
+            from packaging.version import Version
+            try:
+                if Version(latest_version) <= Version(APP_VERSION):
+                    return
+            except Exception:
+                if latest_version == APP_VERSION:
+                    return
+
+            # Find .exe asset in the release
+            download_url = None
+            for asset in release.get('assets', []):
+                if asset['name'].endswith('.exe'):
+                    download_url = asset['browser_download_url']
+                    break
+
+            if not download_url:
+                self.notify("Update Available", f"v{latest_version} available at github.com/{GITHUB_REPO}/releases")
+                return
+
+            debug_log(f"Update available: v{latest_version} (current: v{APP_VERSION})")
+            self.notify("Updating...", f"Downloading ValoSwitcher v{latest_version}...")
+
+            # Download new exe to temp location
+            import tempfile
+            temp_path = os.path.join(tempfile.gettempdir(), 'ValoSwitcher_update.exe')
+            dl_resp = requests.get(download_url, stream=True, timeout=60)
+            dl_resp.raise_for_status()
+            with open(temp_path, 'wb') as f:
+                for chunk in dl_resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+            # If running as exe, auto-replace and restart
+            current_exe = sys.executable
+            if getattr(sys, 'frozen', False):
+                self._apply_update(temp_path, current_exe)
+            else:
+                # Running from source - just save to Downloads
+                download_path = os.path.join(os.path.expandvars('%USERPROFILE%'), 'Downloads', f'ValoSwitcher-v{latest_version}.exe')
+                shutil.move(temp_path, download_path)
+                self.notify("Update Downloaded", f"v{latest_version} saved to Downloads folder")
+
+        except Exception as e:
+            debug_log(f"Update check failed: {e}")
+
+    def _apply_update(self, new_exe_path, current_exe_path):
+        """Replace running exe with new version using a batch script, then restart."""
+        import tempfile
+        bat_path = os.path.join(tempfile.gettempdir(), 'valoswitcher_update.bat')
+
+        bat_content = f'''@echo off
+:: Wait for the app to close
+timeout /t 2 /nobreak >nul
+:: Replace the exe
+move /Y "{new_exe_path}" "{current_exe_path}"
+:: Relaunch
+start "" "{current_exe_path}"
+:: Delete this script
+del "%~f0"
+'''
+        with open(bat_path, 'w') as f:
+            f.write(bat_content)
+
+        self.notify("Updating...", "ValoSwitcher is restarting to apply the update...")
+        time.sleep(1)
+
+        # Launch the updater batch script and exit
+        subprocess.Popen(['cmd', '/c', bat_path], creationflags=subprocess.CREATE_NO_WINDOW)
+        QApplication.quit()
+
     def start_account_monitor(self):
         """Start background monitoring for Riot Client logins."""
         self.account_monitor = QTimer(self)
@@ -1455,6 +1568,10 @@ class App(FramelessWindow):
 
         # Start background account monitor
         self.start_account_monitor()
+
+        # Check for updates in background
+        from threading import Thread
+        Thread(target=self.check_for_updates, daemon=True).start()
 
         # Check if should start minimized
         if '--minimized' in sys.argv or (self.check_autostart() and len(sys.argv) == 1):
