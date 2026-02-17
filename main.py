@@ -1386,12 +1386,20 @@ class App(FramelessWindow):
                 return
 
             # Compare versions
-            from packaging.version import Version
+            if latest_version == APP_VERSION:
+                return
             try:
+                from packaging.version import Version
                 if Version(latest_version) <= Version(APP_VERSION):
                     return
             except Exception:
-                if latest_version == APP_VERSION:
+                # packaging not installed, compare as tuples
+                try:
+                    latest_parts = tuple(int(x) for x in latest_version.split('.'))
+                    current_parts = tuple(int(x) for x in APP_VERSION.split('.'))
+                    if latest_parts <= current_parts:
+                        return
+                except Exception:
                     return
 
             # Find .exe asset in the release
