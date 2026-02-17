@@ -1433,8 +1433,16 @@ class App(FramelessWindow):
         import tempfile
         bat_path = os.path.join(tempfile.gettempdir(), 'valoswitcher_update.bat')
 
+        pid = os.getpid()
         bat_content = f'''@echo off
-:: Wait for the app to close
+:: Wait for ValoSwitcher to fully exit
+:waitloop
+tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >nul
+    goto waitloop
+)
+:: Extra wait for file handles to release
 timeout /t 2 /nobreak >nul
 :: Replace the exe
 move /Y "{new_exe_path}" "{current_exe_path}"
