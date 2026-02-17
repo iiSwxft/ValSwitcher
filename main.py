@@ -12,7 +12,7 @@ import os, sys
 import shutil
 import winreg
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "iiSwxft/ValSwitcher"
 
 def resource_path(relative_path):
