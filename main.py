@@ -12,7 +12,7 @@ import os, sys
 import shutil
 import winreg
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "iiSwxft/ValSwitcher"
 
 def resource_path(relative_path):
@@ -1173,6 +1173,7 @@ class AddAccountDialog(QDialog):
 class App(FramelessWindow):
     """Main Application Window."""
     rank_data_fetched = pyqtSignal(tuple)
+    update_ready = pyqtSignal(str, str)  # (new_exe_path, current_exe_path)
     def __init__(self):
         super().__init__()
         setTheme(Theme.DARK)
@@ -1191,6 +1192,7 @@ class App(FramelessWindow):
         self.credentialLoader.credentials_loaded.connect(self.on_credentials_loaded)
         self.credentialLoader.start()
         self.rank_data_fetched.connect(self.add_new_card)
+        self.update_ready.connect(self._apply_update)
 
     def check_autostart(self):
         """Check if auto-start is enabled in Windows registry."""
@@ -1400,11 +1402,10 @@ class App(FramelessWindow):
                     break
 
             if not download_url:
-                self.notify("Update Available", f"v{latest_version} available at github.com/{GITHUB_REPO}/releases")
+                debug_log(f"Update v{latest_version} available but no .exe asset found")
                 return
 
-            debug_log(f"Update available: v{latest_version} (current: v{APP_VERSION})")
-            self.notify("Updating...", f"Downloading ValoSwitcher v{latest_version}...")
+            debug_log(f"Update available: v{latest_version} (current: v{APP_VERSION}), downloading...")
 
             # Download new exe to temp location
             import tempfile
@@ -1415,15 +1416,14 @@ class App(FramelessWindow):
                 for chunk in dl_resp.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-            # If running as exe, auto-replace and restart
+            # If running as exe, auto-replace and restart via signal (main thread)
             current_exe = sys.executable
             if getattr(sys, 'frozen', False):
-                self._apply_update(temp_path, current_exe)
+                self.update_ready.emit(temp_path, current_exe)
             else:
                 # Running from source - just save to Downloads
                 download_path = os.path.join(os.path.expandvars('%USERPROFILE%'), 'Downloads', f'ValoSwitcher-v{latest_version}.exe')
                 shutil.move(temp_path, download_path)
-                self.notify("Update Downloaded", f"v{latest_version} saved to Downloads folder")
 
         except Exception as e:
             debug_log(f"Update check failed: {e}")
