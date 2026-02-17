@@ -89,7 +89,7 @@ def create_default_config(config_path):
         'DECEIVE_ENABLED': 'false',
         'DEBUG': 'false',
         'NOTIFICATIONS': 'true',
-        'HENRIK_API_KEY': 'HDEV-f3b06a80-a048-4321-98cd-f62edc19fdae'
+        'HENRIK_API_KEY': 'HDEV-f3b06a80-a048-4321-98cd-f62edc19fdae,HDEV-6184bbb1-88af-4539-8ef0-7c3c350541e9'
     }
 
     with open(config_path, 'w') as config_file:
@@ -915,7 +915,9 @@ class CredentialLoader(QThread):
     def fetch_account_henrik(self, in_game_name, in_game_tag):
         """Fetch account data from Henrik's Valorant API (fallback)"""
         base_url = "https://api.henrikdev.xyz/valorant"
-        api_key = get_config().get('SETTINGS', 'HENRIK_API_KEY', fallback='')
+        keys = [k.strip() for k in get_config().get('SETTINGS', 'HENRIK_API_KEY', fallback='').split(',') if k.strip()]
+        import random
+        api_key = random.choice(keys) if keys else ''
         headers = {'Authorization': api_key} if api_key else {}
 
         # Fetch account info (card, level, region)
